@@ -663,8 +663,7 @@ const Store = {
 
   setCurrentStaff(staff) {
     try {
-      if (!staff) localStorage.removeItem("aram_office_current_staff_v1");
-      else localStorage.setItem("aram_office_current_staff_v1", JSON.stringify(staff));
+      localStorage.setItem("aram_office_current_staff_v1", JSON.stringify(staff));
     } catch(e) {}
   },
 
