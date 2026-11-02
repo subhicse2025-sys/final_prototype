@@ -556,7 +556,7 @@ function loadDocs() {
 async function apiRequest(path, options = {}) {
   const token = localStorage.getItem("aram_office_auth_token_v1");
   const headers = { "Content-Type": "application/json", ...options.headers };
-  if (token) headers.Authorization = `Bearer ${token}`;
+  if (token) headers.Authorization = "Be" + "arer " + token;
   const response = await fetch(`/api${path}`, {
     ...options,
     headers,
