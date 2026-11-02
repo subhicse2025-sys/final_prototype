@@ -23,13 +23,26 @@ let docFilters = { q: "", department: "", category: "", importance: "", status: 
 let selectedCategoryPath = null;
 
 // ── Boot ──────────────────────────────────────────────────────────────
-document.addEventListener("DOMContentLoaded", () => {
-  Engine.buildIndex(Store.getAll());
+document.addEventListener("DOMContentLoaded", async () => {
   setupNavigation();
   setupTopbar();
   setupModal();
-  updateTopbarUser();
-  navigateTo("dashboard");
+  try {
+    await Store.initialize();
+    await Store.restoreSession();
+    Engine.buildIndex(Store.getAll());
+    updateTopbarUser();
+    navigateTo("dashboard");
+  } catch (error) {
+    const container = document.getElementById("pageContainer");
+    container.innerHTML = `
+      <div class="card" style="max-width:700px;margin:40px auto">
+        <h1 class="page-title">Backend connection failed</h1>
+        <p class="page-subtitle">Start the backend and check its MongoDB Atlas settings, then reload this page.</p>
+        <p style="margin-top:12px;color:#b91c1c">${error.message}</p>
+      </div>`;
+    console.error("Could not initialize the application:", error);
+  }
 });
 
 // ── Navigation ────────────────────────────────────────────────────────
@@ -601,16 +614,20 @@ function confirmDeleteDoc(id) {
   `);
 }
 
-function executeDeleteDoc(id) {
-  const success = Store.deleteDoc(id);
-  if (success) {
-    Engine.buildIndex(Store.getAll());
-    closeModal();
-    toast(`Document ${id} successfully deleted from system.`, "success");
-    if (currentPage === "documents") refreshDocTable();
-    else navigateTo(currentPage);
-  } else {
-    toast(`Failed to delete document ${id}.`, "error");
+async function executeDeleteDoc(id) {
+  try {
+    const success = await Store.deleteDoc(id);
+    if (success) {
+      Engine.buildIndex(Store.getAll());
+      closeModal();
+      toast(`Document ${id} successfully deleted from system.`, "success");
+      if (currentPage === "documents") refreshDocTable();
+      else navigateTo(currentPage);
+    } else {
+      toast(`Failed to delete document ${id}.`, "error");
+    }
+  } catch (error) {
+    toast(error.message, "error");
   }
 }
 
@@ -719,7 +736,7 @@ function updateEditCatOptions() {
   sel.innerHTML = (CATEGORIES[dept]||[]).map(c=>`<option>${c}</option>`).join("");
 }
 
-function saveEdit(id) {
+async function saveEdit(id) {
   const title = document.getElementById("editTitle").value.trim();
   const kw    = document.getElementById("editKw").value.trim();
   let ok = true;
@@ -727,18 +744,22 @@ function saveEdit(id) {
   if (!kw)    { document.getElementById("eErrKw").classList.add("show");    document.getElementById("editKw").classList.add("error");    ok=false; } else { document.getElementById("eErrKw").classList.remove("show");    document.getElementById("editKw").classList.remove("error"); }
   if (!ok) return;
   const keywords = kw.split(",").map(k=>k.trim()).filter(k=>k);
-  Store.updateDoc(id, {
-    title, keywords,
-    importance: document.getElementById("editImp").value,
-    department: document.getElementById("editDept").value,
-    category:   document.getElementById("editCat").value,
-    content:    document.getElementById("editContent").value.trim()
-  });
-  Engine.reindexDoc(Store.getById(id));
-  closeModal();
-  toast(`✏️ Document ${id} updated successfully.`, "success");
-  if (currentPage === "documents") refreshDocTable();
-  else if (currentPage === "dashboard") navigateTo("dashboard");
+  try {
+    await Store.updateDoc(id, {
+      title, keywords,
+      importance: document.getElementById("editImp").value,
+      department: document.getElementById("editDept").value,
+      category:   document.getElementById("editCat").value,
+      content:    document.getElementById("editContent").value.trim()
+    });
+    Engine.reindexDoc(Store.getById(id));
+    closeModal();
+    toast(`✏️ Document ${id} updated successfully.`, "success");
+    if (currentPage === "documents") refreshDocTable();
+    else if (currentPage === "dashboard") navigateTo("dashboard");
+  } catch (error) {
+    toast(error.message, "error");
+  }
 }
 
 // ── Version History Modal ─────────────────────────────────────────────
@@ -1049,19 +1070,22 @@ function openAddVersionModal(id) {
   `);
 }
 
-function submitNewVersion(id) {
+async function submitNewVersion(id) {
   const notes = document.getElementById("verNotes").value.trim();
   if (!notes) { document.getElementById("verNotesErr").classList.add("show"); return; }
   document.getElementById("verNotesErr").classList.remove("show");
-  const newVer = Store.addVersion(id, notes);
-  Engine.reindexDoc(Store.getById(id));
-  closeModal();
-  toast(`✅ Version ${newVer} added to ${id}. Previous version marked Outdated.`, "success");
-  // Refresh current page
-  if (currentPage === "versions") {
-    renderVersions(document.getElementById("pageContainer"));
-    setTimeout(() => selectVerDoc(id), 100);
-  } else if (currentPage === "dashboard") navigateTo("dashboard");
+  try {
+    const newVer = await Store.addVersion(id, notes);
+    Engine.reindexDoc(Store.getById(id));
+    closeModal();
+    toast(`✅ Version ${newVer} added to ${id}. Previous version marked Outdated.`, "success");
+    if (currentPage === "versions") {
+      renderVersions(document.getElementById("pageContainer"));
+      setTimeout(() => selectVerDoc(id), 100);
+    } else if (currentPage === "dashboard") navigateTo("dashboard");
+  } catch (error) {
+    toast(error.message, "error");
+  }
 }
 
 // ═════════════════════════════════════════════════════════════════════
@@ -1278,7 +1302,7 @@ function updateAddCatOptions() {
   sel.innerHTML = (CATEGORIES[dept]||[]).map(c=>`<option>${c}</option>`).join("");
 }
 
-function submitAddDoc() {
+async function submitAddDoc() {
   const id    = document.getElementById("addId").value.trim().toUpperCase();
   const title = document.getElementById("addTitle").value.trim();
   const kw    = document.getElementById("addKw").value.trim();
@@ -1317,13 +1341,23 @@ function submitAddDoc() {
     }]
   };
 
-  Store.addDoc(doc);
-  Engine.indexNewDoc(doc);
-  closeModal();
-  toast(`✅ Document ${id} added successfully!`, "success");
-  if (currentPage === "documents") { navigateTo("documents"); }
-  else if (currentPage === "dashboard") navigateTo("dashboard");
-  else navigateTo(currentPage);
+  try {
+    await Store.addDoc(doc);
+    Engine.indexNewDoc(doc);
+    closeModal();
+    toast(`✅ Document ${id} added successfully!`, "success");
+    if (currentPage === "documents") { navigateTo("documents"); }
+    else if (currentPage === "dashboard") navigateTo("dashboard");
+    else navigateTo(currentPage);
+  } catch (error) {
+    if (error.message.includes("already exists")) {
+      errId.textContent = error.message;
+      errId.classList.add("show");
+      document.getElementById("addId").classList.add("error");
+    } else {
+      toast(error.message, "error");
+    }
+  }
 }
 
 // ═════════════════════════════════════════════════════════════════════
@@ -1713,7 +1747,6 @@ let isProofVerified = false;
 
 function renderStaffPortal(container) {
   const currentStaff = Store.getCurrentStaff();
-  const staffList = Store.getStaffList();
 
   container.innerHTML = `
     <div class="page-header">
@@ -1936,7 +1969,7 @@ function quickFillStaff(id) {
   toast(`Selected staff: ${staff.name}`, "info");
 }
 
-function submitStaffLogin() {
+async function submitStaffLogin() {
   const ident = document.getElementById("loginIdentifier").value.trim();
   const pass  = document.getElementById("loginPassword").value.trim();
   const capt  = document.getElementById("captchaInput").value.trim().toUpperCase();
@@ -1952,13 +1985,13 @@ function submitStaffLogin() {
     return;
   }
 
-  const res = Store.loginStaff(ident, pass);
-  if (res.success) {
+  try {
+    const res = await Store.loginStaff(ident, pass);
     updateTopbarUser();
     toast(`Welcome, ${res.staff.name}! Logged in successfully.`, "success");
     navigateTo("dashboard");
-  } else {
-    toast(res.message, "error");
+  } catch (error) {
+    toast(error.message, "error");
   }
 }
 
@@ -2058,7 +2091,7 @@ function runGovernmentStaffVerification() {
   }, 700);
 }
 
-function submitStaffRegistration() {
+async function submitStaffRegistration() {
   if (!isProofVerified) {
     toast("You must verify your staff proof first.", "error");
     return;
@@ -2091,12 +2124,12 @@ function submitStaffRegistration() {
     proofFileName: uploadedProofFile ? uploadedProofFile.name : "Staff_Proof.pdf"
   };
 
-  const res = Store.registerStaff(staffData);
-  if (res.success) {
+  try {
+    const res = await Store.registerStaff(staffData);
     updateTopbarUser();
     toast(`Registration complete! Welcome, ${res.staff.name}.`, "success");
     navigateTo("dashboard");
-  } else {
-    toast(res.message, "error");
+  } catch (error) {
+    toast(error.message, "error");
   }
 }

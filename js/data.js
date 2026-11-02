@@ -553,8 +553,23 @@ function loadDocs() {
   return JSON.parse(JSON.stringify(INITIAL_DOCUMENTS));
 }
 
-function saveDocs(docs) {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(docs)); } catch(e) {}
+async function apiRequest(path, options = {}) {
+  const token = localStorage.getItem("aram_office_auth_token_v1");
+  const headers = { "Content-Type": "application/json", ...options.headers };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const response = await fetch(`/api${path}`, {
+    ...options,
+    headers,
+    body: options.body ? JSON.stringify(options.body) : undefined
+  });
+  if (response.status === 204) return null;
+  const data = await response.json();
+  if (!response.ok) {
+    const error = new Error(data.error || `Request failed (${response.status}).`);
+    error.status = response.status;
+    throw error;
+  }
+  return data;
 }
 
 function loadActivity() {
@@ -577,10 +592,23 @@ function saveActivity(act) {
 
 // ── Exported store object ─────────────────────────────────────────────
 const Store = {
-  docs: loadDocs(),
+  docs: [],
   activity: loadActivity(),
+  currentStaff: null,
 
-  save() { saveDocs(this.docs); },
+  async initialize() {
+    this.docs = await apiRequest("/documents");
+    if (this.docs.length === 0) {
+      const initialDocs = loadDocs();
+      try {
+        await apiRequest("/documents/bootstrap", { method: "POST", body: initialDocs });
+      } catch (error) {
+        if (!error.message.includes("already been initialized")) throw error;
+      }
+      this.docs = await apiRequest("/documents");
+    }
+    localStorage.removeItem(STORAGE_KEY);
+  },
 
   getAll() { return this.docs; },
 
@@ -588,34 +616,41 @@ const Store = {
 
   idExists(id) { return this.docs.some(d => d.id === id); },
 
-  addDoc(doc) {
-    this.docs.push(doc);
-    this.save();
+  async addDoc(doc) {
+    const savedDoc = await apiRequest("/documents", { method: "POST", body: doc });
+    this.docs.push(savedDoc);
     this.pushActivity("green", `<strong>${doc.id}</strong> ${doc.title} added.`);
   },
 
-  updateDoc(id, changes) {
-    const idx = this.docs.findIndex(d => d.id === id);
-    if (idx !== -1) {
-      Object.assign(this.docs[idx], changes);
-      this.save();
-      this.pushActivity("blue", `<strong>${id}</strong> metadata updated.`);
-    }
+  async updateDoc(id, changes) {
+    const existing = this.getById(id);
+    if (!existing) throw new Error("Document not found.");
+    const updatedDoc = await apiRequest(`/documents/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: { ...existing, ...changes }
+    });
+    Object.assign(existing, updatedDoc);
+    this.pushActivity("blue", `<strong>${id}</strong> metadata updated.`);
   },
 
-  addVersion(id, notes) {
+  async addVersion(id, notes) {
     const doc = this.getById(id);
     if (!doc) return false;
-    // Mark all existing versions outdated
-    doc.versions.forEach(v => v.status = "Outdated");
+    const updatedDoc = {
+      ...doc,
+      versions: doc.versions.map(version => ({ ...version, status: "Outdated" }))
+    };
     const newVer = {
-      version: doc.versions.length + 1,
+      version: updatedDoc.versions.length + 1,
       date: new Date().toISOString().slice(0, 10),
       status: "Current",
       notes: notes || "New version added."
     };
-    doc.versions.push(newVer);
-    this.save();
+    updatedDoc.versions.push(newVer);
+    Object.assign(doc, await apiRequest(`/documents/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: updatedDoc
+    }));
     this.pushActivity("orange", `<strong>${id}</strong> updated to Version ${newVer.version}. Previous version marked Outdated.`);
     return newVer.version;
   },
@@ -630,84 +665,58 @@ const Store = {
     saveActivity(this.activity);
   },
 
-  deleteDoc(id) {
+  async deleteDoc(id) {
     const idx = this.docs.findIndex(d => d.id === id);
-    if (idx !== -1) {
-      const removed = this.docs.splice(idx, 1)[0];
-      this.save();
-      this.pushActivity("red", `<strong>${id}</strong> "${removed.title}" was deleted.`);
-      return true;
-    }
-    return false;
+    if (idx === -1) return false;
+    const removed = this.docs[idx];
+    await apiRequest(`/documents/${encodeURIComponent(id)}`, { method: "DELETE" });
+    this.docs.splice(idx, 1);
+    this.pushActivity("red", `<strong>${id}</strong> "${removed.title}" was deleted.`);
+    return true;
   },
 
   // ── Staff Authentication ──
   getStaffList() {
+    return DEFAULT_STAFF;
+  },
+
+  getCurrentStaff() { return this.currentStaff; },
+
+  async restoreSession() {
+    if (!localStorage.getItem("aram_office_auth_token_v1")) return;
     try {
-      const raw = localStorage.getItem("aram_office_staff_v1");
-      return raw ? JSON.parse(raw) : DEFAULT_STAFF;
-    } catch(e) { return DEFAULT_STAFF; }
-  },
-
-  saveStaffList(list) {
-    try { localStorage.setItem("aram_office_staff_v1", JSON.stringify(list)); } catch(e) {}
-  },
-
-  getCurrentStaff() {
-    try {
-      const raw = localStorage.getItem("aram_office_current_staff_v1");
-      if (raw) return JSON.parse(raw);
-    } catch(e) {}
-    return DEFAULT_STAFF[0]; // Default logged-in staff for easy demo
-  },
-
-  setCurrentStaff(staff) {
-    try {
-      localStorage.setItem("aram_office_current_staff_v1", JSON.stringify(staff));
-    } catch(e) {}
-  },
-
-  registerStaff(data) {
-    const list = this.getStaffList();
-    if (list.some(s => s.email.toLowerCase() === data.email.toLowerCase())) {
-      return { success: false, message: "Staff member with this official email is already registered." };
+      this.currentStaff = await apiRequest("/auth/me");
+    } catch (error) {
+      if (error.status === 401) {
+        localStorage.removeItem("aram_office_auth_token_v1");
+        return;
+      }
+      throw error;
     }
-    if (list.some(s => s.id.toUpperCase() === data.id.toUpperCase())) {
-      return { success: false, message: "Staff Employee ID is already registered." };
-    }
-    const newStaff = {
-      ...data,
-      verificationStatus: "Verified",
-      verificationToken: "GOV-TN-AUTH-" + Math.floor(100000 + Math.random() * 900000),
-      registeredAt: new Date().toISOString().slice(0, 10)
-    };
-    list.push(newStaff);
-    this.saveStaffList(list);
-    this.setCurrentStaff(newStaff);
-    this.pushActivity("green", `Staff Officer <strong>${newStaff.name}</strong> registered & verified.`);
-    return { success: true, staff: newStaff };
   },
 
-  loginStaff(identifier, password) {
-    const list = this.getStaffList();
-    const idClean = identifier.trim().toLowerCase();
-    const staff = list.find(s => 
-      s.email.toLowerCase() === idClean || 
-      s.id.toLowerCase() === idClean
-    );
-    if (!staff) {
-      return { success: false, message: "No staff found with this Employee ID or Email." };
-    }
-    if (staff.password !== password) {
-      return { success: false, message: "Incorrect password. Please verify credentials." };
-    }
-    this.setCurrentStaff(staff);
-    this.pushActivity("blue", `Staff Officer <strong>${staff.name}</strong> logged in.`);
-    return { success: true, staff };
+  async registerStaff(data) {
+    const result = await apiRequest("/auth/register", { method: "POST", body: data });
+    localStorage.setItem("aram_office_auth_token_v1", result.token);
+    this.currentStaff = result.staff;
+    this.pushActivity("green", `Staff Officer <strong>${result.staff.name}</strong> registered & verified.`);
+    return { success: true, staff: result.staff };
+  },
+
+  async loginStaff(identifier, password) {
+    const result = await apiRequest("/auth/login", {
+      method: "POST",
+      body: { identifier, password }
+    });
+    localStorage.setItem("aram_office_auth_token_v1", result.token);
+    this.currentStaff = result.staff;
+    this.pushActivity("blue", `Staff Officer <strong>${result.staff.name}</strong> logged in.`);
+    return { success: true, staff: result.staff };
   },
 
   logoutStaff() {
-    this.setCurrentStaff(null);
+    localStorage.removeItem("aram_office_auth_token_v1");
+    this.currentStaff = null;
     this.pushActivity("orange", `Staff session ended.`);
   },
 
